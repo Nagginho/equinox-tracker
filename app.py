@@ -17,6 +17,7 @@ st.title("Equinox: Life Dashboard")
 @st.cache_resource
 def get_connection():
     """Authenticates with Google Sheets using Streamlit Secrets."""
+    # Load secrets from the .streamlit/secrets.toml file
     key_dict = json.loads(st.secrets["google_key"])
     creds = Credentials.from_service_account_info(
         key_dict, 
@@ -37,10 +38,11 @@ with tab_log:
     st.header("Daily Log")
     st.write("Log your metrics below. It takes less than 10 seconds.")
     
-    # 1. FIX: Added format="DD/MM/YYYY" for British display
+    # 1. Date Input (British Format Display)
     entry_date = st.date_input("Date", datetime.date.today(), format="DD/MM/YYYY")
     st.divider()
 
+    # --- INPUT FORM ---
     st.subheader("Body & Diet")
     weight = st.number_input("Weight (kg) - Optional", value=None, placeholder="e.g. 81.6")
     veggie_meals = st.radio("Vegetarian Meals Today", options=[0, 1, 2, 3], horizontal=True)
@@ -59,17 +61,25 @@ with tab_log:
         cycle = st.checkbox("Cycle")
         read = st.checkbox("Read / Edu")
 
+    # --- SAVE ACTION ---
     if st.button("Save Daily Entry"):
         try:
             client = get_connection()
+            # Note: Ensure this URL points to your specific "Entry" sheet
             sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1YhYGFyAUNKByZ_fN1jDs3G1raBeB8MXko61DE3NtUTI").sheet1
             
+            # Helper to convert Checkbox (True/False) to 1/0
             def tick_to_num(val): return 1 if val else 0
+            
+            # Handle optional weight (send empty string if None)
             w_val = weight if weight is not None else ""
             
-            # 2. FIX: Convert date to British string (DD/MM/YYYY) before saving
+            # Format date to British string (DD/MM/YYYY) for the Sheet
             formatted_date = entry_date.strftime("%d/%m/%Y")
             
+            # Prepare the row data
+            # This appends to the next empty row. 
+            # If you have Headers in Row 1 & 2, this will naturally start at Row 3.
             row = [
                 formatted_date, 
                 w_val, 
@@ -81,7 +91,7 @@ with tab_log:
                 tick_to_num(cycle), 
                 tick_to_num(knee_exercise), 
                 tick_to_num(gym), 
-                0, # Placeholder
+                0, # Placeholder (e.g. Golf)
                 tick_to_num(read)
             ]
             
@@ -96,88 +106,72 @@ with tab_log:
 # ---------------------------------------------------------
 with tab_dash:
     st.header("Historical Trends")
+    st.write("Visualising your progress over the years.")
     
     if st.checkbox("Load Historical Data"):
         try:
             client = get_connection()
+            # Note: Ensure this URL points to your "Historical/Data" sheet
             hist_sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1tZ48YYIPMz9algjc4blxoHcxaiwnVIli_bFZNZrVXfU").sheet1
             
+            # 1. GET ALL DATA
             raw_data = hist_sheet.get_all_values()
             
-            if not raw_data:
-                st.warning("Sheet appears to be empty.")
+            # Check if we have enough data (Need at least 2 header rows + 1 data row)
+            if len(raw_data) < 3:
+                st.warning("Sheet appears to be empty or missing data rows (need 2 header rows).")
             else:
-                # --- Header Cleaning ---
-                original_headers = raw_data[0]
-                rows = raw_data[1:]
+                # 2. PARSE HEADERS CORRECTLY
+                # Row 0 = Categories (Body, Habits...) -> We ignore this for dataframe columns
+                # Row 1 = Actual Headers (Date, Weight, Gym...) -> We use this!
+                header_row = raw_data[1] 
+                
+                # Data starts from Row 2 (Index 2 is the 3rd row)
+                data_rows = raw_data[2:]
 
+                # 3. CLEAN HEADERS (Handle duplicates or blanks)
                 final_headers = []
                 seen_count = {}
-                for i, h in enumerate(original_headers):
+
+                for i, h in enumerate(header_row):
                     h = str(h).strip()
-                    if not h: h = f"Column_{i}"
+                    if not h:
+                        h = f"Column_{i}"
+                    
                     if h in seen_count:
                         seen_count[h] += 1
                         h = f"{h}_{seen_count[h]}"
                     else:
                         seen_count[h] = 1
+                    
                     final_headers.append(h)
 
-                df = pd.DataFrame(rows, columns=final_headers)
+                # 4. CREATE DATAFRAME
+                df = pd.DataFrame(data_rows, columns=final_headers)
 
-                # --- Debug Expander (In case issues persist) ---
-                with st.expander("See Raw Data Columns"):
-                    st.write(df.columns.tolist())
+                # 5. CONVERT DATA TO NUMBERS
+                # We try to convert every column to numeric, ignoring errors (so dates remain strings)
+                # This ensures "81.5" (string) becomes 81.5 (float)
+                for col in df.columns:
+                    # Skip Date/Notes columns
+                    if "Date" not in col and "Note" not in col:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
 
-                # --- 3. FIX: Robust Weight Finder (Case Insensitive) ---
+                # 6. PLOT WEIGHT
+                # Smart search for "Weight" column
                 weight_col = None
                 for col in df.columns:
-                    if 'weight' in col.lower(): # Checks for 'Weight', 'weight', 'Weight (kg)'
+                    if 'weight' in col.lower():
                         weight_col = col
                         break
                 
-                # Plot Weight
                 if weight_col:
-                    df[weight_col] = pd.to_numeric(df[weight_col], errors='coerce')
                     st.subheader("Body Weight")
-                    st.line_chart(df[[weight_col]].dropna())
+                    # Drop NA values so the line is continuous
+                    chart_data = df[[weight_col]].dropna()
+                    # Reset index to make the x-axis cleaner (optional)
+                    st.line_chart(chart_data)
                 else:
-                    st.warning("Could not automatically find a 'Weight' column.")
+                    st.warning("Could not automatically find a 'Weight' column in Row 2.")
 
-                # --- 4. FIX: Visualize ALL Categories ---
-                st.subheader("Habit Consistency")
-                
-                # List of keywords to look for in columns matching your input tab
-                habit_keywords = [
-                    'veggie', 'vitamin', 'gym', 'drink', 'alcohol', 
-                    'water', 'protein', 'knee', 'cycle', 'read', 'golf', 'run'
-                ]
-                
-                found_habits = []
-                for keyword in habit_keywords:
-                    for col in df.columns:
-                        # Case insensitive check matching keyword to column name
-                        if keyword in col.lower() and col != weight_col:
-                            # Convert to numeric to ensure it plots
-                            df[col] = pd.to_numeric(df[col], errors='coerce')
-                            found_habits.append(col)
-                
-                # Remove duplicates
-                found_habits = list(set(found_habits))
-
-                if found_habits:
-                    # Let user select which habits to view to avoid overcrowding
-                    selected_habits = st.multiselect(
-                        "Select habits to visualize:", 
-                        found_habits, 
-                        default=found_habits
-                    )
-                    if selected_habits:
-                        st.line_chart(df[selected_habits])
-                else:
-                    st.info("No habit columns found to plot.")
-            
-        except Exception as e:
-            st.warning("Could not load historical data.")
-            st.error(f"Detailed Error: {e}")
-        
+                #
