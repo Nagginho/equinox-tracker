@@ -37,7 +37,8 @@ with tab_log:
     st.header("Daily Log")
     st.write("Log your metrics below. It takes less than 10 seconds.")
     
-    entry_date = st.date_input("Date", datetime.date.today())
+    # 1. FIX: Added format="DD/MM/YYYY" for British display
+    entry_date = st.date_input("Date", datetime.date.today(), format="DD/MM/YYYY")
     st.divider()
 
     st.subheader("Body & Diet")
@@ -61,18 +62,16 @@ with tab_log:
     if st.button("Save Daily Entry"):
         try:
             client = get_connection()
-            # LINK TO NEW DATA ENTRY SHEET
             sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1YhYGFyAUNKByZ_fN1jDs3G1raBeB8MXko61DE3NtUTI").sheet1
             
-            # Helper to convert True/False to 1/0
             def tick_to_num(val): return 1 if val else 0
-            
-            # Handle optional weight
             w_val = weight if weight is not None else ""
             
-            # Prepare row data
+            # 2. FIX: Convert date to British string (DD/MM/YYYY) before saving
+            formatted_date = entry_date.strftime("%d/%m/%Y")
+            
             row = [
-                str(entry_date), 
+                formatted_date, 
                 w_val, 
                 veggie_meals, 
                 tick_to_num(vitamins), 
@@ -82,12 +81,12 @@ with tab_log:
                 tick_to_num(cycle), 
                 tick_to_num(knee_exercise), 
                 tick_to_num(gym), 
-                0, # Placeholder for Golf if needed later
+                0, # Placeholder
                 tick_to_num(read)
             ]
             
             sheet.append_row(row)
-            st.success("Entry saved successfully! Great job today.")
+            st.success(f"Entry for {formatted_date} saved successfully!")
             
         except Exception as e:
             st.error(f"Error saving data: {e}")
@@ -97,85 +96,88 @@ with tab_log:
 # ---------------------------------------------------------
 with tab_dash:
     st.header("Historical Trends")
-    st.write("Visualising your progress over the years.")
     
     if st.checkbox("Load Historical Data"):
         try:
             client = get_connection()
-            # LINK TO HISTORICAL DATA SHEET
             hist_sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1tZ48YYIPMz9algjc4blxoHcxaiwnVIli_bFZNZrVXfU").sheet1
             
-            # 1. Get ALL raw values (bypassing strict header checks)
             raw_data = hist_sheet.get_all_values()
             
             if not raw_data:
                 st.warning("Sheet appears to be empty.")
             else:
-                # 2. SEPARATE HEADERS & ROWS
+                # --- Header Cleaning ---
                 original_headers = raw_data[0]
                 rows = raw_data[1:]
 
-                # 3. CLEAN THE HEADERS (Fix duplicates/blanks)
                 final_headers = []
                 seen_count = {}
-
                 for i, h in enumerate(original_headers):
                     h = str(h).strip()
-                    if not h:
-                        h = f"Column_{i}"
-                    
+                    if not h: h = f"Column_{i}"
                     if h in seen_count:
                         seen_count[h] += 1
                         h = f"{h}_{seen_count[h]}"
                     else:
                         seen_count[h] = 1
-                    
                     final_headers.append(h)
 
-                # 4. CREATE DATAFRAME
                 df = pd.DataFrame(rows, columns=final_headers)
 
-                # 5. DATA CLEANING & CONVERSION
-                # Filter out summary rows (where 'Week' is not a number)
-                if 'Week' in df.columns:
-                    df = df[pd.to_numeric(df['Week'], errors='coerce').notnull()]
-                
-                # Intelligent Weight Column Finder
-                target_weight_col = 'Weight'
-                if target_weight_col not in df.columns:
-                    # Look for any column containing "Weight"
-                    for col in df.columns:
-                        if 'Weight' in col:
-                            target_weight_col = col
-                            break
+                # --- Debug Expander (In case issues persist) ---
+                with st.expander("See Raw Data Columns"):
+                    st.write(df.columns.tolist())
+
+                # --- 3. FIX: Robust Weight Finder (Case Insensitive) ---
+                weight_col = None
+                for col in df.columns:
+                    if 'weight' in col.lower(): # Checks for 'Weight', 'weight', 'Weight (kg)'
+                        weight_col = col
+                        break
                 
                 # Plot Weight
-                if target_weight_col in df.columns:
-                    df[target_weight_col] = pd.to_numeric(df[target_weight_col], errors='coerce')
-                    st.subheader("Weight Trend")
-                    st.line_chart(df[[target_weight_col]].dropna())
+                if weight_col:
+                    df[weight_col] = pd.to_numeric(df[weight_col], errors='coerce')
+                    st.subheader("Body Weight")
+                    st.line_chart(df[[weight_col]].dropna())
                 else:
                     st.warning("Could not automatically find a 'Weight' column.")
 
-                # Plot Habits
+                # --- 4. FIX: Visualize ALL Categories ---
                 st.subheader("Habit Consistency")
-                possible_habits = ['Veggie', 'Vitamins', 'Gym', 'No Drink', 'Golf', 'Read', 'Run', 'Tennis']
+                
+                # List of keywords to look for in columns matching your input tab
+                habit_keywords = [
+                    'veggie', 'vitamin', 'gym', 'drink', 'alcohol', 
+                    'water', 'protein', 'knee', 'cycle', 'read', 'golf', 'run'
+                ]
+                
                 found_habits = []
-
-                for habit in possible_habits:
+                for keyword in habit_keywords:
                     for col in df.columns:
-                        if habit in col:
-                            # force conversion to numeric so it plots
+                        # Case insensitive check matching keyword to column name
+                        if keyword in col.lower() and col != weight_col:
+                            # Convert to numeric to ensure it plots
                             df[col] = pd.to_numeric(df[col], errors='coerce')
                             found_habits.append(col)
                 
-                found_habits = list(set(found_habits)) # Remove duplicates
+                # Remove duplicates
+                found_habits = list(set(found_habits))
 
                 if found_habits:
-                    st.bar_chart(df[found_habits])
+                    # Let user select which habits to view to avoid overcrowding
+                    selected_habits = st.multiselect(
+                        "Select habits to visualize:", 
+                        found_habits, 
+                        default=found_habits
+                    )
+                    if selected_habits:
+                        st.line_chart(df[selected_habits])
                 else:
-                    st.info("No standard habit columns found to plot.")
+                    st.info("No habit columns found to plot.")
             
         except Exception as e:
             st.warning("Could not load historical data.")
             st.error(f"Detailed Error: {e}")
+        
