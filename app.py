@@ -35,9 +35,9 @@ tab_log, tab_dash = st.tabs(["📝 Log Entry", "📊 Dashboard"])
 # ---------------------------------------------------------
 with tab_log:
     st.header("Daily Log")
-    st.write("Log your metrics below. It takes less than 10 seconds.")
+    st.write("Log your metrics below.")
     
-    # 1. Date Input (British Format Display)
+    # 1. Date Input
     entry_date = st.date_input("Date", datetime.date.today(), format="DD/MM/YYYY")
     st.divider()
 
@@ -64,16 +64,11 @@ with tab_log:
     if st.button("Save Daily Entry"):
         try:
             client = get_connection()
-            # LINK TO ENTRY SHEET
+            # Note: Ensure this URL points to your specific "Entry" sheet
             sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1YhYGFyAUNKByZ_fN1jDs3G1raBeB8MXko61DE3NtUTI").sheet1
             
-            # Helper: Convert Checkbox to 1/0
             def tick_to_num(val): return 1 if val else 0
-            
-            # Helper: Handle weight
             w_val = weight if weight is not None else ""
-            
-            # Helper: Format date to British string (DD/MM/YYYY)
             formatted_date = entry_date.strftime("%d/%m/%Y")
             
             row = [
@@ -87,7 +82,7 @@ with tab_log:
                 tick_to_num(cycle), 
                 tick_to_num(knee_exercise), 
                 tick_to_num(gym), 
-                0, # Placeholder
+                0, 
                 tick_to_num(read)
             ]
             
@@ -102,82 +97,144 @@ with tab_log:
 # ---------------------------------------------------------
 with tab_dash:
     st.header("Historical Trends")
-    st.write("Visualising your progress over the years.")
+    st.write("Visualising your progress by Week, Month, and Year.")
     
     if st.checkbox("Load Historical Data"):
         try:
             client = get_connection()
-            # LINK TO HISTORICAL DATA SHEET
-            hist_sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1tZ48YYIPMz9algjc4blxoHcxaiwnVIli_bFZNZrVXfU").sheet1
+            sh = client.open_by_url("https://docs.google.com/spreadsheets/d/1tZ48YYIPMz9algjc4blxoHcxaiwnVIli_bFZNZrVXfU")
             
-            # 1. GET ALL DATA
-            raw_data = hist_sheet.get_all_values()
+            all_data_frames = []
             
-            if len(raw_data) < 3:
-                st.warning("Sheet appears to be empty or missing data rows.")
-            else:
-                # 2. PARSE HEADERS CORRECTLY
-                # Row 0 = Categories -> Ignore
-                # Row 1 = Actual Headers -> Use this
-                header_row = raw_data[1] 
+            # 1. LOOP THROUGH ALL SHEETS
+            worksheets = sh.worksheets()
+            progress_text = st.empty()
+            
+            for ws in worksheets:
+                # Attempt to extract year from sheet name (e.g., "2024" or "Year 2024")
+                sheet_title = ws.title.strip()
+                year_val = None
+                
+                # Simple check: is the title a 4-digit number?
+                if sheet_title.isdigit() and len(sheet_title) == 4:
+                    year_val = int(sheet_title)
+                else:
+                    # If sheet is named "Overview" or "Templates", skip it
+                    continue
+
+                progress_text.text(f"Processing Year: {year_val}...")
+                
+                raw_data = ws.get_all_values()
+                
+                if len(raw_data) < 3:
+                    continue
+                
+                # 2. HEADERS & DATA
+                # Row 1 (Index 0) = Categories
+                # Row 2 (Index 1) = Headers (Week, Weight, Gym...)
+                header_row = raw_data[1]
                 data_rows = raw_data[2:]
-
-                # 3. CLEAN HEADERS
-                final_headers = []
+                
+                # Clean Headers
+                clean_headers = []
                 seen_count = {}
-
-                for i, h in enumerate(header_row):
+                for h in header_row:
                     h = str(h).strip()
-                    if not h: h = f"Column_{i}"
+                    if not h: h = "Unknown"
                     if h in seen_count:
                         seen_count[h] += 1
                         h = f"{h}_{seen_count[h]}"
                     else:
                         seen_count[h] = 1
-                    final_headers.append(h)
+                    clean_headers.append(h)
+                
+                df_sheet = pd.DataFrame(data_rows, columns=clean_headers)
+                
+                # 3. CONVERT WEEK COLUMN TO DATE
+                # We assume the FIRST column is the Week Number
+                first_col_name = df_sheet.columns[0]
+                
+                # Force first column to numeric (Week Number)
+                df_sheet[first_col_name] = pd.to_numeric(df_sheet[first_col_name], errors='coerce')
+                
+                # Drop rows where Week Number is NaN (empty rows)
+                df_sheet = df_sheet.dropna(subset=[first_col_name])
+                
+                # Function to calculate date from Year + Week Number
+                def get_date_from_week(week_num, year):
+                    try:
+                        # Returns the Monday of that week
+                        return datetime.date.fromisocalendar(year, int(week_num), 1)
+                    except:
+                        return None
 
-                # 4. CREATE DATAFRAME
-                df = pd.DataFrame(data_rows, columns=final_headers)
-
-                # 5. CONVERT TO NUMBERS
+                # Create 'Date' column
+                df_sheet['Date'] = df_sheet[first_col_name].apply(lambda x: get_date_from_week(x, year_val))
+                
+                all_data_frames.append(df_sheet)
+            
+            progress_text.empty()
+            
+            if not all_data_frames:
+                st.warning("No valid yearly data found (Tabs must be named '2023', '2024', etc).")
+            else:
+                # 4. COMBINE & PREPARE
+                df = pd.concat(all_data_frames, ignore_index=True)
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df.dropna(subset=['Date']).sort_values('Date')
+                
+                # Convert all other columns to numeric
                 for col in df.columns:
-                    if "Date" not in col and "Note" not in col:
+                    if col != 'Date':
                         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-                # 6. PLOT WEIGHT
-                weight_col = None
-                for col in df.columns:
-                    if 'weight' in col.lower():
-                        weight_col = col
-                        break
+                # --- FILTERS ---
+                st.divider()
+                st.subheader("⚙️ View Settings")
                 
-                if weight_col:
-                    st.subheader("Body Weight")
-                    st.line_chart(df[[weight_col]].dropna())
-                else:
-                    st.warning("Could not automatically find a 'Weight' column.")
+                time_view = st.radio(
+                    "Group Data By:", 
+                    ["Original (Weekly)", "Monthly Average", "Yearly Average"], 
+                    horizontal=True
+                )
+                
+                # Create plotting dataframe indexed by Date
+                plot_df = df.set_index('Date').copy()
+                
+                # Since source data is already weekly, "Original" is weekly.
+                if "Monthly" in time_view:
+                    plot_df = plot_df.resample('ME').mean()
+                elif "Yearly" in time_view:
+                    plot_df = plot_df.resample('YE').mean()
 
-                # 7. PLOT HABITS
-                st.subheader("Habit Consistency")
+                # --- VISUALIZATIONS ---
                 
-                search_terms = ['Veggie', 'Vitamin', 'Gym', 'Drink', 'Alcohol', 
+                # A. Weight
+                weight_col = next((c for c in df.columns if 'weight' in c.lower()), None)
+                if weight_col:
+                    st.subheader("⚖️ Weight Trends")
+                    st.line_chart(plot_df[[weight_col]].dropna())
+                
+                # B. Habits
+                st.subheader("✅ Habit Consistency")
+                
+                habit_keywords = ['Veggie', 'Vitamin', 'Gym', 'Drink', 'Alcohol', 
                                 'Water', 'Protein', 'Knee', 'Cycle', 'Read', 'Golf', 'Run']
                 
                 found_habits = []
-                for term in search_terms:
+                for kw in habit_keywords:
                     for col in df.columns:
-                        if term.lower() in col.lower() and col != weight_col:
+                        if kw.lower() in col.lower() and col != weight_col and col != 'Date':
                             found_habits.append(col)
-                
                 found_habits = list(set(found_habits))
-
+                
                 if found_habits:
-                    options = st.multiselect("Select Habits:", found_habits, default=found_habits)
-                    if options:
-                        st.line_chart(df[options])
+                    selected = st.multiselect("Select Habits:", found_habits, default=found_habits[:3])
+                    if selected:
+                        st.line_chart(plot_df[selected])
                 else:
                     st.info("No habit columns found.")
-            
+
         except Exception as e:
             st.warning("Could not load historical data.")
             st.error(f"Detailed Error: {e}")
