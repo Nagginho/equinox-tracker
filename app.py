@@ -5,16 +5,18 @@ import gspread
 import pandas as pd
 from google.oauth2.service_account import Credentials
 
-# App Title
-st.set_page_config(page_title="Equinox", page_icon="📈")
+# ---------------------------------------------------------
+# CONFIGURATION & SETUP
+# ---------------------------------------------------------
+st.set_page_config(page_title="Equinox", page_icon="📈", layout="centered")
 st.title("Equinox: Life Dashboard")
 
 # ---------------------------------------------------------
-# AUTHENTICATION & CONNECTION FUNCTION
+# AUTHENTICATION FUNCTION
 # ---------------------------------------------------------
-# We cache this so the app doesn't reload the database every time you click a button
 @st.cache_resource
 def get_connection():
+    """Authenticates with Google Sheets using Streamlit Secrets."""
     key_dict = json.loads(st.secrets["google_key"])
     creds = Credentials.from_service_account_info(
         key_dict, 
@@ -33,6 +35,8 @@ tab_log, tab_dash = st.tabs(["📝 Log Entry", "📊 Dashboard"])
 # ---------------------------------------------------------
 with tab_log:
     st.header("Daily Log")
+    st.write("Log your metrics below. It takes less than 10 seconds.")
+    
     entry_date = st.date_input("Date", datetime.date.today())
     st.divider()
 
@@ -57,65 +61,121 @@ with tab_log:
     if st.button("Save Daily Entry"):
         try:
             client = get_connection()
-            # PASTE YOUR NEW DAILY SHEET LINK HERE
-            sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1YhYGFyAUNKByZ_fN1jDs3G1raBeB8MXko61DE3NtUTI/edit?usp=drivesdk").sheet1
+            # LINK TO NEW DATA ENTRY SHEET
+            sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1YhYGFyAUNKByZ_fN1jDs3G1raBeB8MXko61DE3NtUTI").sheet1
             
+            # Helper to convert True/False to 1/0
             def tick_to_num(val): return 1 if val else 0
+            
+            # Handle optional weight
             w_val = weight if weight is not None else ""
             
-            row = [str(entry_date), w_val, veggie_meals, tick_to_num(vitamins), 
-                   tick_to_num(no_drink), tick_to_num(water), tick_to_num(protein), 
-                   tick_to_num(cycle), tick_to_num(knee_exercise), tick_to_num(gym), 
-                   0, tick_to_num(read)] # 0 placeholder for Golf/Other if needed
+            # Prepare row data
+            row = [
+                str(entry_date), 
+                w_val, 
+                veggie_meals, 
+                tick_to_num(vitamins), 
+                tick_to_num(no_drink), 
+                tick_to_num(water), 
+                tick_to_num(protein), 
+                tick_to_num(cycle), 
+                tick_to_num(knee_exercise), 
+                tick_to_num(gym), 
+                0, # Placeholder for Golf if needed later
+                tick_to_num(read)
+            ]
             
             sheet.append_row(row)
-            st.success("Saved!")
+            st.success("Entry saved successfully! Great job today.")
+            
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error saving data: {e}")
 
 # ---------------------------------------------------------
 # TAB 2: DASHBOARD (Historical Insights)
 # ---------------------------------------------------------
 with tab_dash:
     st.header("Historical Trends")
+    st.write("Visualising your progress over the years.")
     
-    # Load Data Button (Save data by not loading automatically)
     if st.checkbox("Load Historical Data"):
         try:
             client = get_connection()
-            # PASTE YOUR OLD HISTORICAL SHEET LINK HERE
-            hist_sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1tZ48YYIPMz9algjc4blxoHcxaiwnVIli_bFZNZrVXfU/edit?usp=drivesdk").sheet1
+            # LINK TO HISTORICAL DATA SHEET
+            hist_sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1tZ48YYIPMz9algjc4blxoHcxaiwnVIli_bFZNZrVXfU").sheet1
             
-            # 1. Get all data
-            data = hist_sheet.get_all_records()
-            df = pd.DataFrame(data)
-
-            # 2. CLEANING: The magic step
-            # We filter out rows where 'Week' is not a number (removes '2025', 'Average' etc)
-            # This handles the structure seen in your PDF
-            if 'Week' in df.columns:
-                df = df[pd.to_numeric(df['Week'], errors='coerce').notnull()]
+            # 1. Get ALL raw values (bypassing strict header checks)
+            raw_data = hist_sheet.get_all_values()
             
-            # Convert Weight to numbers, treating "N/A" as NaN (empty)
-            if 'Weight' in df.columns:
-                df['Weight'] = pd.to_numeric(df['Weight'], errors='coerce')
+            if not raw_data:
+                st.warning("Sheet appears to be empty.")
+            else:
+                # 2. SEPARATE HEADERS & ROWS
+                original_headers = raw_data[0]
+                rows = raw_data[1:]
 
-            # 3. VISUALISATION
-            st.subheader("Weight Trend (All Time)")
-            # Simple line chart of the Weight column
-            st.line_chart(df[['Weight']].dropna())
+                # 3. CLEAN THE HEADERS (Fix duplicates/blanks)
+                final_headers = []
+                seen_count = {}
 
-            # 4. Habit Consistency
-            st.subheader("Habit Consistency (Weekly Counts)")
-            # Let's try to plot 'Veggie' or 'Vitamins' if they exist
-            habits_to_plot = []
-            if 'Veggie' in df.columns: habits_to_plot.append('Veggie')
-            if 'Vitamins' in df.columns: habits_to_plot.append('Vitamins')
-            if 'Gym' in df.columns: habits_to_plot.append('Gym')
-            
-            if habits_to_plot:
-                st.bar_chart(df[habits_to_plot])
+                for i, h in enumerate(original_headers):
+                    h = str(h).strip()
+                    if not h:
+                        h = f"Column_{i}"
+                    
+                    if h in seen_count:
+                        seen_count[h] += 1
+                        h = f"{h}_{seen_count[h]}"
+                    else:
+                        seen_count[h] = 1
+                    
+                    final_headers.append(h)
+
+                # 4. CREATE DATAFRAME
+                df = pd.DataFrame(rows, columns=final_headers)
+
+                # 5. DATA CLEANING & CONVERSION
+                # Filter out summary rows (where 'Week' is not a number)
+                if 'Week' in df.columns:
+                    df = df[pd.to_numeric(df['Week'], errors='coerce').notnull()]
+                
+                # Intelligent Weight Column Finder
+                target_weight_col = 'Weight'
+                if target_weight_col not in df.columns:
+                    # Look for any column containing "Weight"
+                    for col in df.columns:
+                        if 'Weight' in col:
+                            target_weight_col = col
+                            break
+                
+                # Plot Weight
+                if target_weight_col in df.columns:
+                    df[target_weight_col] = pd.to_numeric(df[target_weight_col], errors='coerce')
+                    st.subheader("Weight Trend")
+                    st.line_chart(df[[target_weight_col]].dropna())
+                else:
+                    st.warning("Could not automatically find a 'Weight' column.")
+
+                # Plot Habits
+                st.subheader("Habit Consistency")
+                possible_habits = ['Veggie', 'Vitamins', 'Gym', 'No Drink', 'Golf', 'Read', 'Run', 'Tennis']
+                found_habits = []
+
+                for habit in possible_habits:
+                    for col in df.columns:
+                        if habit in col:
+                            # force conversion to numeric so it plots
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+                            found_habits.append(col)
+                
+                found_habits = list(set(found_habits)) # Remove duplicates
+
+                if found_habits:
+                    st.bar_chart(df[found_habits])
+                else:
+                    st.info("No standard habit columns found to plot.")
             
         except Exception as e:
-            st.warning("Could not load data. Check your sheet link!")
-            st.error(e)
+            st.warning("Could not load historical data.")
+            st.error(f"Detailed Error: {e}")
