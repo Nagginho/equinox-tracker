@@ -3,6 +3,7 @@ import datetime
 import json
 import gspread
 import pandas as pd
+import altair as alt  # <--- NEW: Added for custom axis control
 from google.oauth2.service_account import Credentials
 
 # ---------------------------------------------------------
@@ -111,31 +112,25 @@ with tab_dash:
             progress_text = st.empty()
             
             for ws in worksheets:
-                # Attempt to extract year from sheet name (e.g., "2024" or "Year 2024")
+                # Attempt to extract year from sheet name (e.g., "2024")
                 sheet_title = ws.title.strip()
                 year_val = None
                 
-                # Simple check: is the title a 4-digit number?
                 if sheet_title.isdigit() and len(sheet_title) == 4:
                     year_val = int(sheet_title)
                 else:
-                    # If sheet is named "Overview" or "Templates", skip it
                     continue
 
                 progress_text.text(f"Processing Year: {year_val}...")
                 
                 raw_data = ws.get_all_values()
-                
                 if len(raw_data) < 3:
                     continue
                 
                 # 2. HEADERS & DATA
-                # Row 1 (Index 0) = Categories
-                # Row 2 (Index 1) = Headers (Week, Weight, Gym...)
                 header_row = raw_data[1]
                 data_rows = raw_data[2:]
                 
-                # Clean Headers
                 clean_headers = []
                 seen_count = {}
                 for h in header_row:
@@ -151,26 +146,17 @@ with tab_dash:
                 df_sheet = pd.DataFrame(data_rows, columns=clean_headers)
                 
                 # 3. CONVERT WEEK COLUMN TO DATE
-                # We assume the FIRST column is the Week Number
                 first_col_name = df_sheet.columns[0]
-                
-                # Force first column to numeric (Week Number)
                 df_sheet[first_col_name] = pd.to_numeric(df_sheet[first_col_name], errors='coerce')
-                
-                # Drop rows where Week Number is NaN (empty rows)
                 df_sheet = df_sheet.dropna(subset=[first_col_name])
                 
-                # Function to calculate date from Year + Week Number
                 def get_date_from_week(week_num, year):
                     try:
-                        # Returns the Monday of that week
                         return datetime.date.fromisocalendar(year, int(week_num), 1)
                     except:
                         return None
 
-                # Create 'Date' column
                 df_sheet['Date'] = df_sheet[first_col_name].apply(lambda x: get_date_from_week(x, year_val))
-                
                 all_data_frames.append(df_sheet)
             
             progress_text.empty()
@@ -183,7 +169,6 @@ with tab_dash:
                 df['Date'] = pd.to_datetime(df['Date'])
                 df = df.dropna(subset=['Date']).sort_values('Date')
                 
-                # Convert all other columns to numeric
                 for col in df.columns:
                     if col != 'Date':
                         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -198,10 +183,9 @@ with tab_dash:
                     horizontal=True
                 )
                 
-                # Create plotting dataframe indexed by Date
+                # Create plotting dataframe
                 plot_df = df.set_index('Date').copy()
                 
-                # Since source data is already weekly, "Original" is weekly.
                 if "Monthly" in time_view:
                     plot_df = plot_df.resample('ME').mean()
                 elif "Yearly" in time_view:
@@ -209,13 +193,29 @@ with tab_dash:
 
                 # --- VISUALIZATIONS ---
                 
-                # A. Weight
+                # A. Weight Chart (CUSTOM AXIS [75, 90])
                 weight_col = next((c for c in df.columns if 'weight' in c.lower()), None)
                 if weight_col:
                     st.subheader("⚖️ Weight Trends")
-                    st.line_chart(plot_df[[weight_col]].dropna())
+                    
+                    # Prepare data for Altair (Reset index to get Date as a column)
+                    chart_data = plot_df[[weight_col]].dropna().reset_index()
+                    
+                    if not chart_data.empty:
+                        # Define the custom chart
+                        chart = alt.Chart(chart_data).mark_line(point=True).encode(
+                            x=alt.X('Date', title='Date'),
+                            y=alt.Y(weight_col, 
+                                    scale=alt.Scale(domain=[75, 90]), # <--- FIXED DOMAIN
+                                    title='Weight (kg)'),
+                            tooltip=['Date', weight_col]
+                        ).interactive()
+                        
+                        st.altair_chart(chart, use_container_width=True)
+                    else:
+                        st.info("No weight data available to plot.")
                 
-                # B. Habits
+                # B. Habits Chart
                 st.subheader("✅ Habit Consistency")
                 
                 habit_keywords = ['Veggie', 'Vitamin', 'Gym', 'Drink', 'Alcohol', 
